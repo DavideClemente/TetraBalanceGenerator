@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Tetra Balance</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #ffffff;
+            color: #333;
+            overflow: hidden;
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+        }
+
+        .controls {
+            position: absolute;
+            bottom: 50px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 100;
+        }
+
+        .btn {
+            background: #333;
+            color: white;
+            border: none;
+            padding: 20px 40px;
+            font-size: 18px;
+            cursor: pointer;
+            border-radius: 8px;
+            font-weight: 500;
+            letter-spacing: .5px;
+            transition: all .3s ease;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, .1);
+            touch-action: manipulation;
+        }
+
+        .btn:hover {
+            background: #555;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, .15);
+        }
+
+        .btn:active {
+            transform: translateY(0);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, .1);
+        }
+
+        .title {
+            position: absolute;
+            top: 50px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 16px;
+            color: #999;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+            text-align: center;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="container">
+        <div id="canvas-container"></div>
+        <div class="controls">
+            <button class="btn" onclick="generateNewPiece()">Get New Piece</button>
+        </div>
+        <div class="title">Tetra Balance</div>
+    </div>
+
+    <!-- three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        let scene, camera, renderer, currentPiece;
+
+        /**
+         * PIECE FORMAT
+         * Each cube is [x, z, h]:
+         *   x -> left/right on the table
+         *   z -> forward/back on the table
+         *   h -> height level (0 on table, 1 one block above, etc.)
+         *
+         * Top & bottom are ALWAYS open; only side faces are covered.
+         * Internal side walls are added where cubes touch at the same height.
+         */
+        const pieces = [
+            // Classic flat tetrominoes (h=0)
+            [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]],                    // I
+            [[0, 0, 0], [1, 0, 0], [2, 0, 0], [2, 1, 0]],                    // L
+            [[0, 0, 0], [1, 0, 0], [2, 0, 0], [1, 1, 0]],                    // T
+            [[0, 0, 0], [1, 0, 0], [1, 1, 0], [2, 1, 0]],                    // Z
+            [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]],                    // O
+            [[0, 0, 0], [1, 0, 0], [1, 1, 0], [1, 0, 1]],
+            [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 0, 1]]
+            //   [[0,0,0],[1,0,0],[2,0,0],[0,1,0]],                    // J
+            //   [[0,0,0],[1,0,0],[1,1,0]],                            // 3-block corner
+            //   [[0,0,0],[1,0,0]],                                    // domino horizontal
+            //   [[0,0,0],[0,1,0]],                                    // domino vertical
+            //   [[0,0,0],[0,1,0],[1,1,0]],                            // alt 3-block corner
+
+            // Examples with vertical stacks (h=1)
+            // L with a stacked cube on the corner
+            //   [[0,0,0],[1,0,0],[0,1,0],[0,1,1]],
+            //   // 2-high domino (stacked)
+            //   [[0,0,0],[0,0,1]],
+            // A little tower at the end of a 3-line
+
+        ];
+
+        function init() {
+            // Scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0xffffff);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(5, 5, 6);
+            camera.lookAt(0, 0, 0);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Lights
+            scene.add(new THREE.AmbientLight(0xffffff, 0.45));
+            const dir = new THREE.DirectionalLight(0xffffff, 1.0);
+            dir.position.set(10, 10, 6);
+            dir.castShadow = true;
+            dir.shadow.mapSize.width = 2048;
+            dir.shadow.mapSize.height = 2048;
+            scene.add(dir);
+
+            // Ground
+            const ground = new THREE.Mesh(
+                new THREE.PlaneGeometry(20, 20),
+                new THREE.MeshLambertMaterial({ color: 0xfafafa, transparent: true, opacity: 0.85 })
+            );
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = -2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            generateNewPiece();
+            animate();
+        }
+
+        // Build a single printed-style block (bars + optional side planes)
+        function createBlock(exposedFaces, material) {
+            const blockGroup = new THREE.Group();
+
+            const size = 1.0;           // cube size
+            const t = 0.05;             // bar thickness
+            const barMat = material;
+            const faceMat = new THREE.MeshLambertMaterial({
+                color: material.color, side: THREE.DoubleSide
+            });
+
+            // Edge bars
+            const horiz = new THREE.BoxGeometry(size, t, t);
+            const depth = new THREE.BoxGeometry(t, t, size);
+            const vert = new THREE.BoxGeometry(t, size, t);
+
+            const addBar = (geom, x, y, z) => {
+                const m = new THREE.Mesh(geom, barMat);
+                m.position.set(x, y, z);
+                m.castShadow = m.receiveShadow = true;
+                blockGroup.add(m);
+            };
+
+            // bottom edges
+            addBar(horiz, 0, -size / 2, size / 2);
+            addBar(horiz, 0, -size / 2, -size / 2);
+            addBar(depth, size / 2, -size / 2, 0);
+            addBar(depth, -size / 2, -size / 2, 0);
+
+            // top edges
+            addBar(horiz, 0, size / 2, size / 2);
+            addBar(horiz, 0, size / 2, -size / 2);
+            addBar(depth, size / 2, size / 2, 0);
+            addBar(depth, -size / 2, size / 2, 0);
+
+            // verticals
+            addBar(vert, size / 2, 0, size / 2);
+            addBar(vert, -size / 2, 0, size / 2);
+            addBar(vert, size / 2, 0, -size / 2);
+            addBar(vert, -size / 2, 0, -size / 2);
+
+            // side faces only (front/back/left/right)
+            const faceGeom = new THREE.PlaneGeometry(size, size);
+            const EPS = 0.0015;
+
+            const addFace = (where) => {
+                const p = new THREE.Mesh(faceGeom, faceMat);
+                if (where === 'front') { p.position.z = size / 2 + EPS; }
+                if (where === 'back') { p.position.z = -size / 2 - EPS; p.rotation.y = Math.PI; }
+                if (where === 'left') { p.position.x = -size / 2 - EPS; p.rotation.y = Math.PI / 2; }
+                if (where === 'right') { p.position.x = size / 2 + EPS; p.rotation.y = -Math.PI / 2; }
+                p.castShadow = p.receiveShadow = true;
+                blockGroup.add(p);
+            };
+
+            exposedFaces.forEach(f => {
+                if (f === 'front' || f === 'back' || f === 'left' || f === 'right') addFace(f);
+            });
+
+            return blockGroup;
+        }
+
+        // Side-face exposure at the SAME height (no top/bottom)
+        function exposedFacesFor([x, z, h], occ3D) {
+            const has = (a, b, c) => occ3D.has(`${a},${b},${c}`); // key(x,z,h)
+            const faces = [];
+            if (!has(x, z + 1, h)) faces.push('front'); // +z
+            if (!has(x, z - 1, h)) faces.push('back');  // -z
+            if (!has(x - 1, z, h)) faces.push('left');  // -x
+            if (!has(x + 1, z, h)) faces.push('right'); // +x
+            return faces; // top/bottom always open
+        }
+
+        // Internal side partitions between touching cubes (same height only)
+        function addInternalWalls(pieceCoords, group, colorMat) {
+            const key = (x, z, h) => `${x},${z},${h}`;
+            const occ3D = new Set(pieceCoords.map(([x, z, h = 0]) => key(x, z, h)));
+
+            const innerGeom = new THREE.PlaneGeometry(1.0, 1.0);
+            const faceMat = new THREE.MeshLambertMaterial({
+                color: colorMat.color,
+                side: THREE.DoubleSide
+            });
+
+            for (const [x, z, h = 0] of pieceCoords) {
+                // Wall between (x,z,h) and (x+1,z,h): plane parallel to YZ at x+0.5
+                if (occ3D.has(key(x + 1, z, h))) {
+                    const p = new THREE.Mesh(innerGeom, faceMat);
+                    p.rotation.y = Math.PI / 2;     // ±X
+                    p.position.set(x + 0.5, h, z);
+                    p.castShadow = p.receiveShadow = true;
+                    group.add(p);
+                }
+                // Wall between (x,z,h) and (x,z+1,h): plane parallel to XY at z+0.5
+                if (occ3D.has(key(x, z + 1, h))) {
+                    const p = new THREE.Mesh(innerGeom, faceMat);
+                    p.position.set(x, h, z + 0.5);
+                    p.castShadow = p.receiveShadow = true;
+                    group.add(p);
+                }
+
+                // NOTE: No horizontal partitions between vertical neighbors (top/bottom stay open)
+            }
+        }
+
+        function generateNewPiece() {
+            if (currentPiece) scene.remove(currentPiece);
+            currentPiece = new THREE.Group();
+
+            const data = pieces[Math.floor(Math.random() * pieces.length)];
+
+            // 3D occupancy keyed by (x,z,h)
+            const occ3D = new Set(data.map(([x, z, h = 0]) => `${x},${z},${h}`));
+            const material = new THREE.MeshLambertMaterial({ color: 0xe74c3c });
+
+            for (const [x, z, h = 0] of data) {
+                const faces = exposedFacesFor([x, z, h], occ3D); // sides only at this height
+                const block = createBlock(faces, material);
+                block.position.set(x, h, z);                  // place using height
+                currentPiece.add(block);
+            }
+
+            // Internal side partitions
+            addInternalWalls(data, currentPiece, material);
+
+            // center
+            const box = new THREE.Box3().setFromObject(currentPiece);
+            const center = box.getCenter(new THREE.Vector3());
+            currentPiece.position.sub(center);
+
+            scene.add(currentPiece);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            if (currentPiece) currentPiece.rotation.y += 0.005;
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        window.addEventListener('load', init);
+    </script>
+</body>
+
+</html>
