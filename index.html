@@ -90,7 +90,8 @@
     <!-- three.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
-        let scene, camera, renderer, currentPiece;
+        let scene, camera, renderer, currentPiece, pivot;
+
 
         /**
          * PIECE FORMAT
@@ -291,17 +292,25 @@
             // Internal side partitions
             addInternalWalls(data, currentPiece, material);
 
-            // center
+            // --- Center the piece and mount it under a pivot at origin ---
             const box = new THREE.Box3().setFromObject(currentPiece);
             const center = box.getCenter(new THREE.Vector3());
+
+            // Move the whole piece so its center sits at (0,0,0)
             currentPiece.position.sub(center);
 
-            scene.add(currentPiece);
+            // Create/replace pivot and attach the centered piece
+            if (pivot) {
+                scene.remove(pivot);
+            }
+            pivot = new THREE.Group();
+            pivot.add(currentPiece);
+            scene.add(pivot);
         }
 
         function animate() {
             requestAnimationFrame(animate);
-            if (currentPiece) currentPiece.rotation.y += 0.005;
+            if (pivot) pivot.rotation.y += 0.005; // rotate around center
             renderer.render(scene, camera);
         }
 
